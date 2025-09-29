@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Iris Study – Image Upload</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 720px }
+    .card { border: 1px solid #ddd; padding: 16px; border-radius: 12px; margin-bottom: 16px }
+    label { display:block; margin: 8px 0 }
+    button { padding: 10px 16px; border-radius: 8px; border: 1px solid #333; cursor: pointer }
+    .muted { color:#555; font-size:0.95em }
+    img#preview { max-width: 100%; margin-top: 8px; display:none }
+  </style>
+</head>
+<body>
+  <h1>Iris Research Upload</h1>
+  <p class="muted">This is a research project. It does <strong>not</strong> provide medical diagnosis. Images are stored securely and used for research with your explicit consent.</p>
+
+  <div class="card">
+    <h2>Consent</h2>
+    <label><input type="checkbox" id="over18"> I am 18 years or older.</label>
+    <label><input type="checkbox" id="data_storage"> I consent to storage and research use of my uploaded iris image and self-reported information.</label>
+    <label><input type="checkbox" id="future_research"> I allow use in future, related research projects. (optional)</label>
+    <label><input type="checkbox" id="recontact_ok"> You may contact me about this submission. (optional; no email collected here)</label>
+  </div>
+
+  <div class="card">
+    <h2>Upload</h2>
+    <input type="file" id="file" accept="image/*" capture="user" />
+    <p class="muted">Tip: Center the eye, avoid glare, and fill as much of the frame with the iris as possible. Do not include your full face.</p>
+    <img id="preview"/>
+  </div>
+
+  <div class="card">
+    <h2>Self-reported health</h2>
+    <label><input type="checkbox" name="sr" value="none"> None / healthy control</label>
+    <label><input type="checkbox" name="sr" value="hypertension"> Hypertension</label>
+    <label><input type="checkbox" name="sr" value="diabetes"> Diabetes</label>
+    <label><input type="checkbox" name="sr" value="thyroid"> Thyroid condition</label>
+    <label><input type="checkbox" name="sr" value="other"> Other</label>
+    <label>Notes (optional):<br>
+      <textarea id="note" rows="3" style="width:100%" placeholder="e.g., dry eyes at night"></textarea>
+    </label>
+
+    <h3>Capture details (optional)</h3>
+    <label>Device type <input id="device" placeholder="e.g., Pixel 8" /></label>
+    <label>Lighting <input id="light" placeholder="e.g., indoor lamp" /></label>
+  </div>
+
+  <button id="submit">Submit</button>
+  <pre id="out" class="muted"></pre>
+
+  <script>
+    // Toggle demo mode on/off. When true, backend calls are mocked.
+    const DEMO = true;
+
+    const API = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+      ? 'http://localhost:8000' : (location.origin.replace(/\/$/, ''));
+
+    async function anon() {
+      const saved = localStorage.getItem('participant_id');
+      if (saved) return saved;
+      if (DEMO) {
+        const pid = (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+        localStorage.setItem('participant_id', pid);
+        return pid;
+      }
+      const r = await fetch(API + '/v1/auth/anon', {method:'POST'});
+      const j = await r.json();
+      localStorage.setItem('participant_id', j.participant_id);
+      return j.participant_id;
+    }
+
+    function readSelfReports() {
+      return Array.from(document.querySelectorAll('input[name="sr"]:checked')).map(x=>x.value);
+    }
+
+    function checkConsent() {
+      const over18 = document.getElementById('over18').checked;
+      const data_storage = document.getElementById('data_storage').checked;
+      if (!over18 || !data_storage) {
+        return { ok:false, msg:'You must confirm you are 18+ and consent to storage to proceed.' };
+      }
+      return { ok:true };
+    }
+
+    async function realRun(file) {
+      const out = document.getElementById('out');
+      const over18 = document.getElementById('over18').checked;
+      const data_storage = document.getElementById('data_storage').checked;
+      const future_research = document.getElementById('future_research').checked;
+      const recontact_ok = document.getElementById('recontact_ok').checked;
+      const participant_id = await anon();
+
+      const upReq = await fetch(API + '/v1/upload-url', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ filename: file.name, contentType: file.type, participant_id })
+      });
+      if (!upReq.ok) { out.textContent = 'Failed to get upload URL.'; return; }
+      const up = await upReq.json();
+
+      const form = new FormData();
+      Object.entries(up.fields).forEach(([k, v]) => form.append(k, v));
+      form.append('file', file);
+      const s3Resp = await fetch(up.url, { method: 'POST', body: form });
+      if (!s3Resp.ok) { out.textContent = 'Upload to S3 failed.'; return; }
+
+      const meta = {
+        device_type: document.getElementById('device').value || null,
+        lighting: document.getElementById('light').value || null,
+        capture_quality_score: null
+      };
+      const submission = {
+        participant_id,
+        object_key: up.object_key,
+        self_reports: readSelfReports(),
+        free_text_note: document.getElementById('note').value,
+        meta,
+        consent: { over18, data_storage, future_research, recontact_ok, consent_version: 'v1' }
+      };
+      const metaResp = await fetch(API + '/v1/submissions', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(submission)
+      });
+      if (!metaResp.ok) { out.textContent = 'Failed to record submission.'; return; }
+      const done = await metaResp.json();
+      out.textContent = 'Thanks! Submission id: ' + done.submission_id + '\nYou can close this page.';
+    }
+
+    async function demoRun(file) {
+      const out = document.getElementById('out');
+      const preview = document.getElementById('preview');
+      const pid = await anon();
+      const fr = new FileReader();
+      fr.onload = () => { preview.src = fr.result; preview.style.display = 'block'; };
+      fr.readAsDataURL(file);
+      out.textContent = 'Pretending to upload…';
+      await new Promise(r => setTimeout(r, 800));
+      const fakeId = new Date().toISOString() + '#' + Math.random().toString(16).slice(2,8);
+      out.textContent = 'Demo complete. (No data saved)\nparticipant_id: ' + pid + '\nsubmission_id: ' + fakeId;
+    }
+
+    async function run() {
+      const out = document.getElementById('out');
+      out.textContent = '';
+
+      const consent = checkConsent();
+      if (!consent.ok) { out.textContent = consent.msg; return; }
+
+      const file = document.getElementById('file').files[0];
+      if (!file) { out.textContent = 'Please choose an image file.'; return; }
+      if (!file.type.startsWith('image/')) { out.textContent = 'File must be an image.'; return; }
+      if (file.size > 8 * 1024 * 1024) { out.textContent = 'Image too large (max 8MB).'; return; }
+
+      if (DEMO) return demoRun(file);
+      return realRun(file);
+    }
+
+    document.getElementById('submit').addEventListener('click', run);
+  </script>
+</body>
+</html>
