@@ -2,7 +2,6 @@
 
 This repo contains a **FastAPI backend** and a **vanilla HTML/JS frontend** for collecting iris images with explicit consent and self-reported health labels.
 
----
 
 🐍 Backend Setup (with Python virtual environment)
 
